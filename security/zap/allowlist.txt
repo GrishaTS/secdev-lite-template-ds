@@ -1,0 +1,6 @@
+# ZAP config file: plugin_id<TAB>LEVEL<TAB>optional message
+# Levels: IGNORE | INFO | WARN | FAIL | OUTOFSCOPE (see zap_common.py)
+
+# 10049 Storable and Cacheable Content — we explicitly disable caching via headers,
+# and this app is a training seed, so treat this as informational.
+10049	IGNORE	Seed app responses are deliberately non-cacheable

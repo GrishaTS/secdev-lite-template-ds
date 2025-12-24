@@ -1,0 +1,107 @@
+name: security
+
+on:
+  push:
+    paths:
+      - '**/*.py'
+      - 'Dockerfile'
+      - 'k8s/**'
+      - '.github/workflows/security.yml'
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  sca:
+    name: SCA (SBOM + Grype)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: sbom
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: syft-json
+          output-file: sbom.json
+      - uses: anchore/scan-action@v3
+        with:
+          sbom: ${{ steps.sbom.outputs.sbom }}
+          fail-build: true
+          severity-cutoff: high
+
+  sast:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: returntocorp/semgrep-action@v1
+        with:
+          config: p/ci
+
+  secrets:
+    name: Secrets (Gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: gitleaks/gitleaks-action@v2
+        with:
+          args: detect --exit-code 1
+
+  policy:
+    name: Policy / Container / IaC (Trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image for scanning
+        run: docker build -t s09s12-app:local .
+      - uses: aquasecurity/trivy-action@0.24.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          vuln-type: os,library
+          exit-code: '1'
+      - uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: s09s12-app:local
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          vuln-type: os,library
+          exit-code: '1'
+
+  dast:
+    name: DAST (OWASP ZAP baseline)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Start app
+        run: |
+          docker network create zapnet || true
+          docker build -t s09s12-app:local .
+          docker run -d --name web --network zapnet -p 8080:8080 s09s12-app:local
+      - name: Pull ZAP image
+        run: docker pull ghcr.io/zaproxy/zaproxy:stable
+      - name: Wait for app
+        run: |
+          for i in {1..40}; do
+            if docker ps --filter "name=web" --filter "status=running" --format '{{.Names}}' | grep -q web \
+              && curl -fsS http://localhost:8080/healthz >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "App failed to become healthy" >&2
+          docker logs web || true
+          exit 1
+      - name: ZAP baseline
+        run: |
+          docker run --rm --network zapnet \
+            -v $PWD:/zap/wrk \
+            ghcr.io/zaproxy/zaproxy:stable \
+            zap-baseline.py -t http://web:8080 -m 3 \
+              -c security/zap/allowlist.txt
+      - name: Cleanup
+        if: always()
+        run: |
+          docker rm -f web || true
+          docker network rm zapnet || true
